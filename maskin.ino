@@ -1,0 +1,1 @@
+//kode til selve maskinen
