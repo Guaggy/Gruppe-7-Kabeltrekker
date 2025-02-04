@@ -13,10 +13,10 @@
 - git stash pop
 
 # lage en ny branch
-- git checkout <branch_name>
+- git checkout -b <branch_name>
 
 # tilbake til main
-- git chekcout -b main
+- git chekcout main
 
 # hvilke branches finnes
 - git branch
