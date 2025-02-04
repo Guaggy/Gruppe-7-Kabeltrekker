@@ -11,3 +11,12 @@
 - git stash
 - git pull
 - git stash pop
+
+# lage en ny branch
+- git checkout <branch_name>
+
+# tilbake til main
+- git chekcout -b main
+
+# hvilke branches finnes
+- git branch
