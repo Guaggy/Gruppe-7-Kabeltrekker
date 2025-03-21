@@ -1,4 +1,3 @@
-//kode for fjernkontroll
 #include <SPI.h>
 #include <nRF24L01.h>
 #include <RF24.h>
@@ -7,8 +6,8 @@
 #include <Adafruit_SSD1306.h>
 
 //modus
-int autonom = 2; //2 = autonom, 1 = admin
-int go = 1;
+int driveMode = 1; //0 = admin, 1 = auto
+int autoGoMode = 0; //0 = kjører ikke, 1 = frem-tilbake , 2 = frem-tilbake-frem
 
 //skjærm
 #define SCREEN_WIDTH 128
@@ -18,40 +17,58 @@ int go = 1;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 //Joystick
-#define joyX A0
-#define joyY A1
-int xval = 0, yval = 0;
+#define joystickXpin A0
+#define joystickYpin A1
+int joystickXval = 0;
+int joystickYval = 0;
 
 //knapper
-int bpin0 = 5, bpin1 = 6, bpin2 = 7;
-int lbpin0 = 1, lbpin1 = 1, lbpin2 = 1;
-int push0 = 0, push1 = 0, push2 = 0;
+int button0pin = 5;
+int button1pin = 6;
+int button2pin = 7;
+int lastButton0val = 1;
+int lastButton1val = 1;
+int lastButton2val = 1;
+int button0press = 0;
+int button1press = 0;
+int button2press = 0;
 
 //lys
-int l0 = 8, l1 = 9, l2 = 10;
+int led0pin = 8;
+int led1pin = 9;
+int led2pin = 10;
 
 //annet
-bool fail = false;
-int step = 1, maxstep = 10, txval = 0, lastxval = 0;
-int ptrinn = 0, maxptrinn = 10, tyval = 0, lastyval = 0;
-int pval = 0, tpval = 0, lasttpval = 0;
-int batper = 0;
-float ktrinn = 0;
+bool failure = false;
+int selectedTrack = 1;
+int numOfTrack = 10;
+int altJoystickXval = 0;
+int lastAltJoystickXval = 0;
+int numStepsToDrive = 0;
+int maxNumStepsToDrive = 10; //begrenser hvor mange trinn den kan kjøre
+int altJoystickYval = 0;
+int lastAltJoystickYval = 0;
+int joystickPushval = 0;
+int lastJoystickPushval = 0;
+int batteryPercentage = 0;
+int numStepsDriven = 0;
+int autoRound = 0;
+int autoPercentage = 0;
 
 //radio
-const byte address[][6] = {"00001","00002"};
+const byte radioAdressList[][6] = {"00001","00002"};
 #define CE_pin 3
 #define CSN_pin 2
 RF24 radio(CE_pin, CSN_pin);
-float senddelay = 0;
-float lastsend = 0;
-float updatedelay = 100;
-float lastupdate = 0;
-bool recable = false;
-float reclimit = 300, lastrec = 0;
+int radioSendDelay = 0;
+long radioLastSendTime = 0;
+int screenUpdateDelay = 100;
+long lastScreenUpdateTime = 0;
+int radioRecieveTimeLimit = 300; //fiks
+long radioLastRecieveTime = 0; //fiks
 
 struct payloadsend {
-  byte ch1; //step
+  byte ch1; //selectedTrack
   byte ch2; //motot fremgang
   byte ch3; //joystick push
   byte ch4; //b0
@@ -66,6 +83,7 @@ struct payloadrec {
   byte ch1; //battery %
   byte ch2; //antall trinn kjørt
   byte ch3; //kjører 1/0
+  byte ch4; //autoRound som kjøres
 };
 payloadrec payloadrec;
 
@@ -138,33 +156,40 @@ const unsigned char Logobitmap [] PROGMEM = {
 };
 
 void setup() {
+  //generell oppstart
   Serial.begin(9600);
-  pinMode(joyY, INPUT);
-  pinMode(joyX, INPUT);
-  pinMode(bpin0, INPUT_PULLUP);
-  pinMode(bpin1, INPUT_PULLUP);
-  pinMode(bpin2, INPUT_PULLUP);
+  pinMode(joystickYpin, INPUT);
+  pinMode(joystickXpin, INPUT);
+  pinMode(button0pin, INPUT_PULLUP);
+  pinMode(button1pin, INPUT_PULLUP);
+  pinMode(button2pin, INPUT_PULLUP);
+  pinMode(led0pin, OUTPUT);
+  pinMode(led1pin, OUTPUT);
+  pinMode(led2pin, OUTPUT);
+  digitalWrite(led0pin, 0);
+  digitalWrite(led1pin, 0);
+  digitalWrite(led2pin, 0);
+  lastButton0val = digitalRead(button0pin);
+  lastButton1val = digitalRead(button1pin);
+  lastButton2val = digitalRead(button2pin);
 
-  pinMode(l0, OUTPUT);
-  pinMode(l1, OUTPUT);
-  pinMode(l2, OUTPUT);
-  digitalWrite(l0, 0);
-  digitalWrite(l1, 0);
-  digitalWrite(l2, 0);
-
-  //modus valg
-  if (digitalRead(bpin2) == 0) { //admin
-    autonom = 1;
+  //kjøremodus valg
+  if (digitalRead(button2pin) == 0) { //admin
+    driveMode = 1;
   } 
-  payloadsend.ch7 = autonom;
+  payloadsend.ch7 = driveMode;
 
   //skjærm oppstart
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println("SSD1306 allocation failed");
-    fail = true;
+  if(display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println("Screen boot ok");
+  }
+  else {
+    Serial.println("No connection with Oled screen");
+    failure = true;
   }
   display.display();
   display.clearDisplay();
+  //logo og boot animasjon
   display.drawBitmap(0, 0, Logobitmap, 128, 64, WHITE);
   display.display();
   delay(3000);
@@ -189,218 +214,226 @@ void setup() {
   delay(300);
   display.setTextSize(2);
   display.setCursor(0,30);
+  //starte radio og vis status på skjerm
   if (radio.begin()) {
-    Serial.println("Boot OK");
+    Serial.println("Radio boot OK");
     display.println();
     display.println(F("OK"));
     display.display();
   }
   else {
     Serial.println("No connection with NRF24");
-    fail = true;
+    failure = true;
     display.println();
     display.println(F("FAILED"));
     display.display();
   }
   delay(1000);
-
-  //radio oppstart
   radio.setAutoAck(false);
   radio.setDataRate(RF24_250KBPS);
   radio.setPALevel(RF24_PA_MAX);
-  radio.openWritingPipe(address[0]);
-  radio.openReadingPipe(0, address[1]);
-
-  //knapper oppstart
-  lbpin0 = digitalRead(bpin0);
-  lbpin1 = digitalRead(bpin1);
-  lbpin2 = digitalRead(bpin2);
+  radio.openWritingPipe(radioAdressList[0]);
+  radio.openReadingPipe(0, radioAdressList[1]);
 }
 
 void loop() {
-  recable = false;
   //joystick
-  xval = map(analogRead(joyX), 240, 785, 0, 255); 
-  yval = map(analogRead(joyY), 240, 785, 255, 0);
-  payloadsend.ch2 = yval;
+  joystickXval = map(analogRead(joystickXpin), 240, 785, 0, 255); 
+  joystickYval = map(analogRead(joystickYpin), 240, 785, 255, 0);
+  payloadsend.ch2 = joystickYval;
 
   //joystick press
-  pval = analogRead(joyY);
-  tpval = 0;
+  joystickPushval = 0;
   payloadsend.ch3 = 0;
-  if (pval >= 900) {
-    tpval = 1;
+  if (analogRead(joystickYpin) >= 900) {
+    joystickPushval = 1;
   }
-  if (tpval != lasttpval && tpval == 1) {
+  if (joystickPushval != lastJoystickPushval && joystickPushval == 1) {
     payloadsend.ch3 = 1;
-    ptrinn++;
+    numStepsToDrive++;
   }
-  lasttpval = tpval;
+  lastJoystickPushval = joystickPushval;
 
   //verdier til auto fremgang
-  if (autonom == 2) {
-    tyval = 0;
-    if (yval >= 240) {
-      tyval = 1;
+  if (driveMode == 1) {
+    altJoystickYval = 0;
+    if (joystickYval >= 240) {
+      altJoystickYval = 1;
     }
-    if (yval <= 15) {
-      tyval = -1;
+    if (joystickYval <= 15) {
+      altJoystickYval = -1;
     }
-    if (tyval != lastyval && tyval == 1) {
-      ptrinn++;
+    if (altJoystickYval != lastAltJoystickYval && altJoystickYval == 1) {
+      numStepsToDrive++;
     }
-    if (tyval != lastyval && tyval == -1) {
-      ptrinn--;
+    if (altJoystickYval != lastAltJoystickYval && altJoystickYval == -1) {
+      numStepsToDrive--;
     }
-    lastyval = tyval;
-    if(ptrinn > maxptrinn) {
-      ptrinn = maxptrinn;
+    lastAltJoystickYval = altJoystickYval;
+    if(numStepsToDrive > maxNumStepsToDrive) {
+      numStepsToDrive = maxNumStepsToDrive;
     }
-    if(ptrinn < 0) {
-      ptrinn = 0;
+    if(numStepsToDrive < 0) {
+      numStepsToDrive = 0;
     }
-    payloadsend.ch8 = ptrinn;
+    payloadsend.ch8 = numStepsToDrive;
   }
 
   //verdier til bom
-  txval = 0;
-  if (xval >= 240) {
-    txval = 1;
+  altJoystickXval = 0;
+  if (joystickXval >= 240) {
+    altJoystickXval = 1;
   }
-  if (xval <= 15) {
-    txval = -1;
+  if (joystickXval <= 15) {
+    altJoystickXval = -1;
   }
-  if (txval != lastxval && txval == 1) {
-    step++;
+  if (altJoystickXval != lastAltJoystickXval && altJoystickXval == 1) {
+    selectedTrack++;
   }
-  if (txval != lastxval && txval == -1) {
-    step--;
+  if (altJoystickXval != lastAltJoystickXval && altJoystickXval == -1) {
+    selectedTrack--;
   }
-  lastxval = txval;
-  if(step > maxstep) {
-    step = maxstep;
+  lastAltJoystickXval = altJoystickXval;
+  if(selectedTrack > numOfTrack) {
+    selectedTrack = numOfTrack;
   }
-  if(step < 1) {
-    step = 1;
+  if(selectedTrack < 1) {
+    selectedTrack = 1;
   }
-  payloadsend.ch1 = step;
+  payloadsend.ch1 = selectedTrack;
 
   //knapper
-  push0 = 0;
-  push1 = 0;
-  push2 = 0;
-  if ((digitalRead(bpin0) == 0) && (lbpin0 == 1)) {
-    push0 = 1;
+  button0press = 0;
+  button1press = 0;
+  button2press = 0;
+  if ((digitalRead(button0pin) == 0) && (lastButton0val == 1)) {
+    button0press = 1;
   }
-  if ((digitalRead(bpin1) == 0) && (lbpin1 == 1)) {
-    push1 = 1;
+  if ((digitalRead(button1pin) == 0) && (lastButton1val == 1)) {
+    button1press = 1;
   }
-  if ((digitalRead(bpin2) == 0) && (lbpin2 == 1)) {
-    push2 = 1;
+  if ((digitalRead(button2pin) == 0) && (lastButton2val == 1)) {
+    button2press = 1;
   }
-  lbpin0 = digitalRead(bpin0);
-  lbpin1 = digitalRead(bpin1);
-  lbpin2 = digitalRead(bpin2);
-  payloadsend.ch4 = push0;
-  payloadsend.ch5 = push1;
-  payloadsend.ch6 = push2;
+  lastButton0val = digitalRead(button0pin);
+  lastButton1val = digitalRead(button1pin);
+  lastButton2val = digitalRead(button2pin);
+  payloadsend.ch4 = button0press;
+  payloadsend.ch5 = button1press;
+  payloadsend.ch6 = button2press;
 
   //send data
   radio.stopListening();
   radio.setPayloadSize(sizeof(payloadsend));
-  delay(5);
-  if (millis() >= lastsend + senddelay) {
-    radio.write(&payloadsend, sizeof(payloadsend));
-    Serial.print(payloadsend.ch1);
-    Serial.print("   ");
-    Serial.print(payloadsend.ch2);
-    Serial.print("   ");
-    Serial.print(payloadsend.ch3);
-    Serial.print("   ");
-    Serial.print(payloadsend.ch4);
-    Serial.print("   ");
-    Serial.print(payloadsend.ch5);
-    Serial.print("   ");
-    Serial.print(payloadsend.ch6);
-    Serial.print("   ");
-    Serial.print(payloadsend.ch7);
-    Serial.print("   ");
-    Serial.println(payloadsend.ch8);
-    recable = true;
+  //delay(5);
+  if (millis() >= radioLastSendTime + radioSendDelay) {
+    sendRadio();
   }
   //motta data
-  if(recable) {
-    radio.startListening();
-    radio.setPayloadSize(sizeof(payloadrec));
-    delay(5);
-    radio.read(&payloadrec, sizeof(payloadrec));
-    Serial.print(payloadrec.ch1);
-    Serial.print("   ");
-    Serial.print(payloadrec.ch2);
-    Serial.print("   ");
-    Serial.println(payloadrec.ch3);
-    Serial.println();
-    if (payloadrec.ch1 > 1) {
-      batper = payloadrec.ch1;
-    }
-    if (payloadrec.ch2 != 0) {
-      ktrinn = payloadrec.ch2 * 0.25;
-    }
-    if (payloadrec.ch3 != 0) {
-      go = payloadrec.ch3;
-    }
+  radio.startListening();
+  radio.setPayloadSize(sizeof(payloadrec));
+  //delay(5);
+  if (radio.available()) {
+    readRadio();
   }
   //oppdatere skjærm
-  if (millis() >= lastupdate + updatedelay) {
-    display.setTextSize(2);
-    display.clearDisplay();
-    display.setCursor(0,3);
-    if(autonom == 2) {
-      display.print(F("AUTO"));
-    }
-    else {
-      display.print(F("ADMIN"));
-    }
-    if(go == 2) {
-      display.fillTriangle(60, 2, 60, 22 , 75, 12, SSD1306_WHITE);
-    }
-    if(go == 1) {
-      display.fillRect(60,2,15,15, SSD1306_WHITE);
-    }
-    display.drawRect(80,2,40,20, SSD1306_WHITE);
-    display.fillRect(120,10,3,4, SSD1306_WHITE);
-    display.fillRect(80,2,((40./100.)*batper)/1,20, SSD1306_WHITE);
-    display.drawLine(0,25,128,25, SSD1306_WHITE);
-    display.setCursor(0,30);
-    display.print(F("Step: "));
-    display.println(step);
-    if (autonom == 2) {
-      if (go == 1) {
-        display.print(F("Dist: "));
-        display.println(ptrinn*0.25);
-      }
-      if (go == 2) {
-        display.print(F("Dist: "));
-        display.println(ktrinn*0.25);
-      }
-    }
-    else {
-      display.print(F("Dist: "));
-      display.println(ktrinn);
-    }
-    display.display();
+  if (millis() >= lastScreenUpdateTime + screenUpdateDelay) {
+    updateDisplay();
   }
   //led-lys
-  digitalWrite(l2, 0);
-  digitalWrite(l1, 0);
-  digitalWrite(l0, 0);
-  if (fail) {
-    digitalWrite(l2, 1);
+  if((millis() >= radioLastRecieveTime + radioRecieveTimeLimit) || failure) {
+    digitalWrite(led2pin, 1);
   }
-  if (autonom == 1) {
-    digitalWrite(l1, 1);
+  else {
+    digitalWrite(led2pin, 0);
   }
-  if (!go) {
-    digitalWrite(l0, 1);
+  if (driveMode == 1) {
+    digitalWrite(led1pin, 1);
   }
+  else {
+    digitalWrite(led1pin, 0);
+  }
+  if (autoGoMode == 2) {
+    digitalWrite(led0pin, 1);
+  }
+  else {
+    digitalWrite(led0pin, 0);
+  }
+}
+
+void sendRadio() {
+  radio.write(&payloadsend, sizeof(payloadsend));
+  Serial.print(payloadsend.ch1);
+  Serial.print("   ");
+  Serial.print(payloadsend.ch2);
+  Serial.print("   ");
+  Serial.print(payloadsend.ch3);
+  Serial.print("   ");
+  Serial.print(payloadsend.ch4);
+  Serial.print("   ");
+  Serial.print(payloadsend.ch5);
+  Serial.print("   ");
+  Serial.print(payloadsend.ch6);
+  Serial.print("   ");
+  Serial.print(payloadsend.ch7);
+  Serial.print("   ");
+  Serial.println(payloadsend.ch8);
+}
+
+void readRadio() {
+  radio.read(&payloadrec, sizeof(payloadrec));
+  batteryPercentage = payloadrec.ch1;
+  numStepsDriven = payloadrec.ch2;
+  autoGoMode = payloadrec.ch3;
+  autoRound = payloadrec.ch4;
+  Serial.print(batteryPercentage);
+  Serial.print("   ");
+  Serial.print(numStepsDriven);
+  Serial.print("   ");
+  Serial.print(autoGoMode);
+  Serial.print("   ");
+  Serial.println(autoRound);
+  Serial.println();
+}
+
+void updateDisplay() {
+  display.clearDisplay();
+  display.setCursor(0,3);
+  display.setTextSize(2);
+  if(driveMode == 1) {
+    display.print(F("AUTO"));
+  }
+  else {
+    display.print(F("ADMIN"));
+  }
+  if(autoGoMode == 0) {
+    display.fillRect(60,2,15,15, SSD1306_WHITE);
+  }
+  else {
+    display.fillTriangle(60, 2, 60, 22 , 75, 12, SSD1306_WHITE);
+  }
+  display.drawRect(80,2,40,20, SSD1306_WHITE);
+  display.fillRect(80,2,((40./100.)*batteryPercentage)/1,20, SSD1306_WHITE);
+  display.fillRect(120,10,3,4, SSD1306_WHITE);
+  display.drawLine(0,25,128,25, SSD1306_WHITE);
+  display.setCursor(0,30);
+  display.print(F("Track: "));
+  display.println(selectedTrack);
+  if (driveMode == 1) {
+    if (autoGoMode == 0) {
+      display.print(F("Dist: "));
+      display.println(numStepsToDrive*0.25);
+      numStepsDriven = 0;
+    }
+    else {
+      autoPercentage = map(autoRound*numStepsToDrive+numStepsDriven,0,numStepsToDrive*(autoGoMode+1),0,120);
+      display.drawRect(4,52,120,12, SSD1306_WHITE);
+      display.fillRect(4,52,autoPercentage,12, SSD1306_WHITE);
+    }
+  }
+  else {
+    display.print(F("Dist: "));
+    display.println(numStepsDriven*0.25);
+  }
+  display.display();
 }
