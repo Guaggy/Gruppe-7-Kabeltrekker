@@ -64,8 +64,8 @@ int radioSendDelay = 0;
 long radioLastSendTime = 0;
 int screenUpdateDelay = 100;
 long lastScreenUpdateTime = 0;
-int radioRecieveTimeLimit = 300; //fiks
-long radioLastRecieveTime = 0; //fiks
+int radioRecieveTimeLimit = 500; 
+long radioLastRecieveTime = 0; 
 
 struct payloadsend {
   byte ch1; //selectedTrack
@@ -175,7 +175,7 @@ void setup() {
 
   //kjøremodus valg
   if (digitalRead(button2pin) == 0) { //admin
-    driveMode = 1;
+    driveMode = 0;
   } 
   payloadsend.ch7 = driveMode;
 
@@ -335,25 +335,26 @@ void loop() {
   //delay(5);
   if (radio.available()) {
     readRadio();
+    radioLastRecieveTime = millis();
   }
   //oppdatere skjærm
   if (millis() >= lastScreenUpdateTime + screenUpdateDelay) {
     updateDisplay();
   }
   //led-lys
-  if((millis() >= radioLastRecieveTime + radioRecieveTimeLimit) || failure) {
+  if((millis() >= radioLastRecieveTime + radioRecieveTimeLimit) || (failure)) {
     digitalWrite(led2pin, 1);
   }
   else {
     digitalWrite(led2pin, 0);
   }
-  if (driveMode == 1) {
+  if (driveMode == 0) {
     digitalWrite(led1pin, 1);
   }
   else {
     digitalWrite(led1pin, 0);
   }
-  if (autoGoMode == 2) {
+  if (autoGoMode != 0) {
     digitalWrite(led0pin, 1);
   }
   else {
