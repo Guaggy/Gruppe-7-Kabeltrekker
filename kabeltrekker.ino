@@ -8,18 +8,31 @@
 #define RB_NUM_LEDS 2
 #define LB_NUM_LEDS 2
 #define B_NUM_LEDS 5
+#define LOGO_NUM_LEDS 3
 #define RB_DATA_PIN 33
 #define LB_DATA_PIN 35
 #define B_DATA_PIN 37
+#define LOGO_DATA_PIN 41
 CRGB rightBlinker[RB_NUM_LEDS];
 CRGB leftBlinker[LB_NUM_LEDS];
 CRGB backLight[B_NUM_LEDS];
+CRGB logoLight[LOGO_NUM_LEDS];
 bool wantLights = true;
+int logoRed = 0;
+int logoGreen = 100;
+int logoBlue = 0;
+int logoDelayTime = 300;
+int logoColorVal = 5;
+int logoColorMode = 1;
+int logoColorMaxVal = 100;
+long lastLogoUpdateTime = 0;
 
 //fremgang
+int stepperSleepPin = 47;
 int moveMotorpin1 = 21;
 int moveMotorpin2 = 20;
 int stepCounterpin = 13;
+int stepCounterpin1 = 49;
 int numStepsDriven = 0;
 int lastvalStepCounterpin = 1;
 int stepCounterDelay = 1200;
@@ -35,11 +48,16 @@ bool aktuatorWantPress = false;
 int directionPin = 5;
 int stepPin = 4;
 int zeroButtonBom = 8;
-int stepsToTrackList[] = {0,0,500,1000,200,100,300,100,100,100,300,100};
+int stepsPermm = 88;
+int mmTrackV1 = 16;
+int mmTrackV2 = 32;
+int mmToTrackList[] = {0,1,mmTrackV1,mmTrackV1,mmTrackV1,mmTrackV1,mmTrackV2,mmTrackV1,mmTrackV1,mmTrackV1,mmTrackV1,0};
 AccelStepper myStepper(motorInterfaceType, stepPin, directionPin);
 long sumStepsBom = 0;
 int selectedTrack = 1;
 int lastTrack = 0;
+int stepperSpeed = 500;
+int stepperSpeedHome = 400;
 
 //ned-dytter
 int pushMotorLeftpin1 = 14;
@@ -50,8 +68,8 @@ int limitButtonUpRight = 12;
 int limitButtonUpLeft = 9;
 int limitButtonDownRight = 11;
 int limitButtonDownLeft = 10;
-int autoPushDelayFirst = 1500;
-int autoPushDelayRest = 100;
+int autoPushDelayFRWD = 300;
+int autoPushDelayBWRD = 70;
 int autoPushDelay = 0;
 long lastAutoPush = 0;
 int autoPushDriveDelay = 1000;
@@ -73,7 +91,7 @@ const byte radioAdressList[][6] = {"00001","00002"};
 RF24 radio(CE_pin, CSN_pin);
 int radioSendDelay = 100;
 long radioLastSendTime = 0;
-int radioRecieveTimeLimit = 600;
+int radioRecieveTimeLimit = 500;
 long radioLastRecieveTime = 0;
 bool radioIsSendable = false;
 
@@ -131,7 +149,9 @@ void setup() {
   pinMode(limitButtonUpLeft, INPUT_PULLUP);
   pinMode(limitButtonDownRight, INPUT_PULLUP);
   pinMode(limitButtonDownLeft, INPUT_PULLUP);
+  pinMode(stepperSleepPin, OUTPUT);
   pinMode(stepCounterpin, INPUT_PULLUP);
+  pinMode(stepCounterpin1, INPUT_PULLUP);
   pinMode(batteryMeasurePin, INPUT);
 
   //fremgang oppstart
@@ -142,10 +162,12 @@ void setup() {
   FastLED.addLeds<WS2812B, RB_DATA_PIN, GRB>(rightBlinker, RB_NUM_LEDS);
   FastLED.addLeds<WS2812B, LB_DATA_PIN, GRB>(rightBlinker, LB_NUM_LEDS);
   FastLED.addLeds<WS2812B, B_DATA_PIN, GRB>(backLight, B_NUM_LEDS);
+  FastLED.addLeds<WS2812B, LOGO_DATA_PIN, GRB>(logoLight, LOGO_NUM_LEDS);
   FastLED.setBrightness(255);
   fill_solid(rightBlinker, RB_NUM_LEDS, CRGB(150,150,150));
   fill_solid(leftBlinker, LB_NUM_LEDS, CRGB(150,150,150));
   fill_solid(backLight, B_NUM_LEDS, CRGB(255,0,0));
+  fill_solid(logoLight, LOGO_NUM_LEDS, CRGB(logoRed,logoGreen,logoBlue));
   FastLED.show();
   
   //aktuator oppstart
@@ -154,20 +176,22 @@ void setup() {
   aktuatorStop();
 
   //bom oppstart
+  digitalWrite(stepperSleepPin, HIGH);
+  delay(5);
   myStepper.setPinsInverted(true);
   myStepper.setMaxSpeed(500);
-	myStepper.setAcceleration(400);
-  myStepper.setSpeed(500);
+	myStepper.setAcceleration(1000);
+  myStepper.setSpeed(stepperSpeed);
   myStepper.move(80);
   while (myStepper.run()) {
   }
-  myStepper.setSpeed(-400);
+  myStepper.setSpeed(-stepperSpeedHome);
   while (digitalRead(zeroButtonBom) == HIGH) {
     myStepper.runSpeed();
   }
   myStepper.stop();
   myStepper.setCurrentPosition(0);
-  myStepper.setSpeed(500);
+  myStepper.setSpeed(stepperSpeed);
 
   //ned-dytter oppstart
   while ((digitalRead(limitButtonUpRight) == HIGH) || (digitalRead(limitButtonUpLeft) == HIGH)) {
@@ -205,11 +229,18 @@ void setup() {
 
 void loop() {
 
+  if (myStepper.distanceToGo() == 0) {
+    digitalWrite(stepperSleepPin, LOW);
+  }
+
   //måle gjennomsnitt batteri %
   batteryPercentageTotal += map(analogRead(batteryMeasurePin), batteryMinVoltage, batteryMaxVoltage, 0 ,100);
   batteryCurrentSample++;
   if (batteryCurrentSample >= batterySampleSize) {
     batteryPercentage = batteryPercentageTotal / batterySampleSize;
+    if (batteryPercentage <= 0) {
+      batteryPercentage = 0;
+    }
     batteryCurrentSample = 0;
     batteryPercentageTotal = 0;
   }
@@ -256,14 +287,14 @@ void loop() {
   if ((driveMode == 1) && (numStepsToDrive != 0) && (button1val == 1)) {
     autoGoMode = 1;
     autoRound = 0;
-    autoPushDelay = autoPushDelayFirst;
     numStepsDriven = 0;
+    button1val = 0;
   }
 	if ((driveMode == 1) && (numStepsToDrive != 0) && (button0val == 1)) {
     autoGoMode = 2;
     autoRound = 0;
-    autoPushDelay = autoPushDelayFirst;
     numStepsDriven = 0;
+    button0val = 0;
   }
 
   //fremgang
@@ -299,38 +330,27 @@ void loop() {
       if (numStepsDriven >= numStepsToDrive) {
         autoRound++;
         numStepsDriven = 0;
+        while(digitalRead(stepCounterpin1) == HIGH) {
+        }
+        delay(autoPushDelayFRWD);
         moveStop();
+        autoPush();
         aktuatorNoPress();
         delay(1000);
+        moveFWRD();
+        delay(1000);
+        moveBWRD();
+        delay(2000);
       }
     }
     if (autoRound == 1) {
       moveBWRD();
       if ((digitalRead(stepCounterpin) == 0) && (millis() >= lastAutoPush + autoPushDriveDelay)) {
-        delay(autoPushDelay);
-        autoPushDelay = autoPushDelayRest;
+        delay(autoPushDelayBWRD);
+        //autoPushDelay = autoPushDelayBWRD;
 				//stop og press
         moveStop();
-        pushDownLeft();
-        pushDownRight();
-        while((digitalRead(limitButtonDownRight) == HIGH) || (digitalRead(limitButtonDownLeft) == HIGH)) {
-          if (digitalRead(limitButtonDownRight) == LOW) {
-            pushStopRight();
-          }
-          if (digitalRead(limitButtonDownLeft) == LOW) {
-            pushStopLeft();
-          }
-        }
-        pushUpLeft();
-        pushUpRight();
-        while((digitalRead(limitButtonUpRight) == HIGH) || (digitalRead(limitButtonUpLeft) == HIGH)) {
-          if (digitalRead(limitButtonUpRight) == LOW) {
-            pushStopRight();
-          }
-          if (digitalRead(limitButtonUpLeft) == LOW) {
-            pushStopLeft();
-          }
-        }
+        autoPush();
         lastAutoPush = millis();
         lastStepCountTime = millis();
       }
@@ -353,7 +373,7 @@ void loop() {
     if (autoRound == 3) {
       moveStop();
       if (wantLights) {
-        finishlights();
+        finishLights();
         lightsOn();
       }
       autoGoMode = 0;
@@ -372,10 +392,12 @@ void loop() {
   if (selectedTrack != lastTrack) {
     sumStepsBom = 0;
     for (int i = 0; i <= selectedTrack; i++) {
-      sumStepsBom += stepsToTrackList[i];
+      sumStepsBom += mmToTrackList[i] * stepsPermm;
     }
     myStepper.moveTo(sumStepsBom);
     lastTrack = selectedTrack;
+    digitalWrite(stepperSleepPin, HIGH);
+    delay(5);
   }
 	//kjøre bom
   myStepper.run();
@@ -383,36 +405,7 @@ void loop() {
   //ned-dytter manuell
   if (driveMode == 0) { //admin
     if(button1val == 1) {
-      while((digitalRead(limitButtonDownRight) == HIGH) || (digitalRead(limitButtonDownLeft) == HIGH)) {
-        if (digitalRead(limitButtonDownRight) == LOW) {
-          pushStopRight();
-        }
-        else {
-          pushDownRight();
-        }
-        if (digitalRead(limitButtonDownLeft) == LOW) {
-          pushStopLeft();
-        }
-        else {
-          pushDownLeft();
-        }
-      }
-      pushStopRight();
-      pushStopLeft();
-      while((digitalRead(limitButtonUpRight) == HIGH) || (digitalRead(limitButtonUpLeft) == HIGH)) {
-        if (digitalRead(limitButtonUpRight) == LOW) {
-          pushStopRight();
-        }
-        else {
-          pushUpRight();
-        }
-        if (digitalRead(limitButtonUpLeft) == LOW) {
-          pushStopLeft();
-        }
-        else {
-          pushUpLeft();
-        }
-      }
+      autoPush();
       button1val = 0;
     }
   }
@@ -432,6 +425,69 @@ void loop() {
   }
 	//kjøre stepper
   myStepper.run();
+
+  //lys til logo
+  if ((millis() >= lastLogoUpdateTime + logoDelayTime) && (wantLights)) {
+    lastLogoUpdateTime = millis();
+    logoUpdate();
+  }
+}
+
+void autoPush() {
+  pushDownLeft();
+  pushDownRight();
+  while((digitalRead(limitButtonDownRight) == HIGH) || (digitalRead(limitButtonDownLeft) == HIGH)) {
+    if (digitalRead(limitButtonDownRight) == LOW) {
+      pushStopRight();
+    }
+    if (digitalRead(limitButtonDownLeft) == LOW) {
+      pushStopLeft();
+    }
+  }
+  pushUpLeft();
+  pushUpRight();
+  while((digitalRead(limitButtonUpRight) == HIGH) || (digitalRead(limitButtonUpLeft) == HIGH)) {
+    if (digitalRead(limitButtonUpRight) == LOW) {
+      pushStopRight();
+    }
+    if (digitalRead(limitButtonUpLeft) == LOW) {
+      pushStopLeft();
+    }
+  }
+  pushStopLeft();
+  pushStopRight();
+}
+
+void logoUpdate() {
+  if (logoColorMode == 0) {
+    logoRed -= logoColorVal;
+    logoGreen += logoColorVal;
+    if(logoGreen >= logoColorMaxVal) {
+      logoRed = 0;
+      logoGreen = logoColorMaxVal;
+      logoColorMode++;
+    }
+  }
+  if (logoColorMode == 1) {
+    logoGreen -= logoColorVal;
+    logoBlue += logoColorVal;
+    if(logoBlue >= logoColorMaxVal) {
+      logoGreen = 0;
+      logoBlue = logoColorMaxVal;
+      logoColorMode++;
+    }
+  }
+  if (logoColorMode == 2) {
+    logoBlue -= logoColorVal;
+    logoRed += logoColorVal;
+    if(logoRed >= logoColorMaxVal) {
+      logoBlue = 0;
+      logoRed = logoColorMaxVal;
+      logoColorMode = 0;
+    }
+  }
+  fill_solid(logoLight, LOGO_NUM_LEDS, CRGB(logoRed,logoGreen,logoBlue));
+  FastLED.show();
 }
 
 void sendRadio() {
@@ -489,7 +545,7 @@ void readRadio() {
 
 //Verdier ved ingen Connection
 void safeValues() {
-	
+  joystickYval = 123;
 }
 
 void moveFWRD() {
@@ -552,7 +608,7 @@ void aktuatorStop() {
   digitalWrite(aktuatorpin2, LOW);
 }
 
-void finishlights() {
+void finishLights() {
   fill_solid(rightBlinker, RB_NUM_LEDS, CRGB(0,255,0));
   fill_solid(leftBlinker, LB_NUM_LEDS, CRGB(0,255,0));
   fill_solid(backLight, B_NUM_LEDS, CRGB(0,255,0));
@@ -596,5 +652,6 @@ void lightsOff() {
   fill_solid(rightBlinker, RB_NUM_LEDS, CRGB(0,0,0));
   fill_solid(leftBlinker, LB_NUM_LEDS, CRGB(0,0,0));
   fill_solid(backLight, B_NUM_LEDS, CRGB(0,0,0));
+  fill_solid(logoLight, LOGO_NUM_LEDS, CRGB(0,0,0));
   FastLED.show();
 }
